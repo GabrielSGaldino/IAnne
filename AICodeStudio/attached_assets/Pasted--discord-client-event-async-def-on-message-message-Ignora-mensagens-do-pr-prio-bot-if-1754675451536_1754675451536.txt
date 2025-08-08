@@ -1,0 +1,70 @@
+@discord_client.event
+async def on_message(message):
+    # Ignora mensagens do próprio bot
+    if message.author == discord_client.user:
+        return
+
+    # Responde se for mencionado
+    if discord_client.user.mentioned_in(message):
+        # Verifica se o autor está em um canal de voz
+        if not message.author.voice or not message.author.voice.channel:
+            await message.channel.send("Querido, se você não entrar em um canal de voz, como espera ouvir meus comentários brilhantes? 🎤")
+            return
+
+        try:
+            async with message.channel.typing():
+                logger.info("Recebida menção, iniciando processamento...")
+                
+                user_message = message.clean_content.replace(f'@{discord_client.user.name}', '').strip()
+                detected_lang = language_detector.detect_language(user_message)
+                context_type = response_variations.detect_context_from_message(user_message, detected_lang)
+
+                system_prompt = personality_manager.get_system_prompt(detected_lang)
+                
+                logger.info(f"Gerando resposta do Gemini para: '{user_message[:50]}...'")
+                model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                response = model.generate_content([system_prompt, f"A situação do jogo é a seguinte: {user_message}"])
+                ai_response = response.text.strip()
+                
+                ai_response = response_variations.get_context_aware_response(ai_response, context_type, detected_lang)
+                ai_response = response_variations.add_variation(ai_response, detected_lang)
+
+                await message.channel.send(f"**IAnne** 🎮: {ai_response}")
+                
+                logger.info("Gerando áudio TTS...")
+                audio_file = await tts_manager.generate_tts(ai_response, detected_lang)
+                
+                if not audio_file:
+                    logger.error("Falha ao gerar arquivo TTS.")
+                    return
+
+                voice_channel = message.author.voice.channel
+                voice_client = discord.utils.get(discord_client.voice_clients, guild=message.guild)
+                
+                if voice_client and voice_client.is_connected():
+                    logger.info(f"Movendo para o canal de voz: {voice_channel.name}")
+                    await voice_client.move_to(voice_channel)
+                else:
+                    logger.info(f"Conectando ao canal de voz: {voice_channel.name}")
+                    voice_client = await voice_channel.connect()
+
+                logger.info("Conexão bem-sucedida. Tocando áudio...")
+                voice_client.play(discord.FFmpegPCMAudio(audio_file), after=lambda e: logger.error(f'Erro no player: {e}') if e else None)
+
+                while voice_client.is_playing():
+                    await asyncio.sleep(1)
+                
+                logger.info("Áudio finalizado. Desconectando...")
+                await voice_client.disconnect()
+                logger.info("Desconectado com sucesso.")
+
+        except discord.errors.ClientException as e:
+            logger.error(f"Erro de cliente Discord (provavelmente permissões): {e}")
+            await message.channel.send("Não consegui entrar no seu canal de voz. Você tem certeza que eu tenho permissão para 'Conectar' e 'Falar' aí?")
+        except Exception as e:
+            logger.error(f"Erro geral no processamento da mensagem: {e}", exc_info=True)
+            await message.channel.send("Eita! Deu um bug geral aqui... Tenta de novo? Se não der, avisa meu criador.")
+        finally:
+            if 'audio_file' in locals() and os.path.exists(audio_file):
+                os.remove(audio_file)
+                logger.info(f"Arquivo de áudio temporário {audio_file} removido.")
